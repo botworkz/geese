@@ -6,6 +6,7 @@ use which::which;
 
 use crate::error::{anyhow, Result};
 
+#[derive(Clone)]
 pub struct StackOptions {
     pub enabled: bool,
     pub delay_ms: u64,

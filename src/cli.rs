@@ -196,11 +196,7 @@ fn launch_all(config: &Config, paths: &crate::paths::ResolvedPaths, cli: &Cli) -
         }
 
         // Run stacker in a separate thread so the main thread can block on children.
-        let stack_opts_thread = StackOptions {
-            enabled: stack_opts.enabled,
-            delay_ms: stack_opts.delay_ms,
-            verbose: stack_opts.verbose,
-        };
+        let stack_opts_thread = stack_opts.clone();
         let stacker_handle =
             std::thread::spawn(move || stack_after_launch(successful_count, &stack_opts_thread));
 
@@ -211,10 +207,9 @@ fn launch_all(config: &Config, paths: &crate::paths::ResolvedPaths, cli: &Cli) -
             }
         }
 
-        if let Err(e) = stacker_handle
-            .join()
-            .unwrap_or(Err(anyhow!("stacker thread panicked")))
-        {
+        if let Err(e) = stacker_handle.join().unwrap_or(Err(anyhow!(
+            "stacker thread panicked unexpectedly; re-run with --verbose for more detail"
+        ))) {
             eprintln!("geese: stack: {e:#}");
         }
     } else {
