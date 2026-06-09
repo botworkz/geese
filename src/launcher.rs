@@ -100,6 +100,8 @@ pub fn launch_profile(
     })
 }
 
+// Children are polled with `try_wait`, which reaps them before we remove them from the vector.
+// Clippy cannot see that `Some(status)` means the process is already waited on.
 #[allow(clippy::zombie_processes)]
 pub fn wait_for_children(children: Vec<Child>) -> Result<i32> {
     FORWARDED_SIGNAL.store(0, Ordering::SeqCst);
@@ -303,19 +305,15 @@ fn diff_env(env: &BTreeMap<OsString, OsString>) -> Vec<(String, OsString)> {
 }
 
 fn is_x11_session() -> bool {
+    // `geese` only needs to distinguish Wayland from the common fallback path described in the
+    // project requirements: explicit X11 sessions or environments without Wayland.
     matches!(std::env::var("XDG_SESSION_TYPE"), Ok(value) if value == "x11")
         || std::env::var_os("WAYLAND_DISPLAY").is_none()
 }
 
 fn shell_join(args: &[String]) -> String {
     args.iter()
-        .map(|arg| {
-            if arg.contains(' ') {
-                format!("{arg:?}")
-            } else {
-                arg.clone()
-            }
-        })
+        .map(|arg| format!("{arg:?}"))
         .collect::<Vec<_>>()
         .join(" ")
 }

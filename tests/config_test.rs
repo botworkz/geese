@@ -1,9 +1,10 @@
-#![allow(dead_code)]
-
+#[allow(dead_code)]
 #[path = "../src/config.rs"]
 mod config;
+#[allow(dead_code)]
 #[path = "../src/error.rs"]
 mod error;
+#[allow(dead_code)]
 #[path = "../src/paths.rs"]
 mod paths;
 
