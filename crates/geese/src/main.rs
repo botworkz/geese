@@ -1,4 +1,4 @@
-use std::process;
+use std::{env, process};
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
@@ -35,10 +35,17 @@ enum Commands {
         name: String,
     },
     Launch {
+        #[arg(long)]
+        bin: Option<String>,
         name: String,
         #[arg(last = true)]
         args: Vec<String>,
     },
+}
+
+fn binary_for_launch(bin: Option<String>) -> String {
+    bin.or_else(|| env::var("GEESE_GOOSE_BIN").ok())
+        .unwrap_or_else(|| "goose".to_owned())
 }
 
 fn main() {
@@ -83,9 +90,10 @@ fn run() -> Result<()> {
             let profile = storage.get(&name)?;
             println!("{}", profile.path().display());
         }
-        Commands::Launch { name, args } => {
+        Commands::Launch { bin, name, args } => {
             let profile = storage.get(&name)?;
-            let mut command = profile.command("goose");
+            let program = binary_for_launch(bin);
+            let mut command = profile.command(program);
             command.args(args);
 
             #[cfg(unix)]

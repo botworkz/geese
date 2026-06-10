@@ -33,3 +33,16 @@ parent = "default" # optional
 ## goose integration
 
 `geese path <name>` prints the profile directory, and `geese launch <name> -- ...` executes `goose` with `GOOSE_PATH_ROOT` set to that directory so goose uses that profile's `config/`, `data/`, and `state/` trees.
+
+## Launch binary
+
+`geese launch` resolves the binary to execute in this order, stopping at the first match:
+
+1. `--bin <path>` flag passed directly to `geese launch`
+2. `GEESE_GOOSE_BIN` environment variable (a path or a bare name resolved against `PATH`)
+3. The literal `goose` (current default behaviour)
+
+No validation is performed on the resolved path — if the binary does not exist or is not executable, the OS error from `exec` surfaces the failure clearly.
+
+A profile is intentionally binary-agnostic: it is just a `GOOSE_PATH_ROOT` directory and can be consumed by any goose front-end (CLI today, desktop UI tomorrow) without any change to `profile.toml`.
+

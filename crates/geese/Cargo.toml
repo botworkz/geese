@@ -1,6 +1,6 @@
 [package]
 name = "geese"
-version = "0.0.1"
+version = "0.0.2"
 edition = "2024"
 license = "GPL-3.0-or-later"
 
@@ -14,4 +14,5 @@ toml = "0.8"
 
 [dev-dependencies]
 assert_cmd = "2.0"
+predicates = "3.0"
 tempfile = "3.10"
