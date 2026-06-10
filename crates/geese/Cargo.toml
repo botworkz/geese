@@ -2,7 +2,7 @@
 name = "geese"
 version = "0.0.1"
 edition = "2024"
-license = "Apache-2.0"
+license = "GPL-3.0-or-later"
 
 [dependencies]
 anyhow = "1.0"
