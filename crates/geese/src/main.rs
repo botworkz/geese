@@ -1,8 +1,4 @@
-use std::{
-    env,
-    path::{Path, PathBuf},
-    process,
-};
+use std::{env, path::PathBuf, process};
 
 use clap::{Parser, Subcommand};
 use geese_client::{ClientError, GeesedClient};
@@ -88,9 +84,4 @@ fn format_uptime(uptime_ms: u64) -> String {
     } else {
         format!("{seconds}s")
     }
-}
-
-#[allow(dead_code)]
-fn _path_display(path: &Path) -> String {
-    path.display().to_string()
 }
