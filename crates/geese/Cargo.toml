@@ -4,11 +4,22 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[lib]
+name = "geese"
+path = "src/lib.rs"
+
+[[bin]]
+name = "geese"
+path = "src/main.rs"
+
 [dependencies]
 clap.workspace = true
+dirs.workspace = true
 geese-client = { path = "../geese-client" }
+serde.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
+toml.workspace = true
 
 [dev-dependencies]
 assert_cmd.workspace = true
