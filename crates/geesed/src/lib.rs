@@ -603,9 +603,11 @@ async fn handle_acp_connection(
         return Ok(()); // Connection closed
     }
 
-    // Trim trailing newlines and carriage returns
-    while matches!(buf.last(), Some(b'\n' | b'\r')) {
-        buf.pop();
+    // Trim trailing newlines and carriage returns efficiently
+    if let Some(last_valid) = buf.iter().rposition(|&b| !matches!(b, b'\n' | b'\r')) {
+        buf.truncate(last_valid + 1);
+    } else {
+        buf.clear(); // All bytes are whitespace
     }
 
     let handshake_line = match std::str::from_utf8(&buf) {
