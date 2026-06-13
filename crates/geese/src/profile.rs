@@ -15,6 +15,8 @@ pub struct ProfileMeta {
     pub locked: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub parent: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cwd: Option<std::path::PathBuf>,
 }
 
 #[derive(Clone, Debug)]

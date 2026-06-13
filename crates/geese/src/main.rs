@@ -38,6 +38,42 @@ enum Commands {
     Kill { name: String },
     /// List running goose acp processes
     Ps,
+    /// Print the resolved working directory for a profile
+    Cwd { name: String },
+    /// Set or clear the per-profile working directory
+    SetCwd {
+        /// Profile name
+        name: String,
+        /// Working directory path to set (omit to use --unset)
+        path: Option<String>,
+        /// Clear the per-profile cwd instead of setting it
+        #[arg(long)]
+        unset: bool,
+    },
+    /// Get or set global geesed configuration
+    #[command(subcommand)]
+    Config(ConfigCommands),
+}
+
+#[derive(Debug, Subcommand)]
+enum ConfigCommands {
+    /// Print global config (or a single key if provided)
+    Get {
+        /// Optional key name (currently: "cwd")
+        key: Option<String>,
+    },
+    /// Set a global config value
+    Set {
+        /// Config key name (currently: "cwd")
+        key: String,
+        /// Config value
+        value: String,
+    },
+    /// Clear a global config value
+    Unset {
+        /// Config key name (currently: "cwd")
+        key: String,
+    },
 }
 
 #[derive(Debug, Error)]
@@ -46,6 +82,8 @@ enum CliError {
     NotRunning(PathBuf),
     #[error(transparent)]
     Client(#[from] ClientError),
+    #[error("{0}")]
+    User(String),
 }
 
 #[tokio::main(flavor = "current_thread")]
@@ -136,6 +174,62 @@ async fn run() -> Result<(), CliError> {
                 }
             }
         }
+        Commands::Cwd { name } => {
+            let mut client = ensure_running().await?;
+            let resolved = client.resolve_cwd(&name).await?;
+            println!("{}", resolved.display());
+        }
+        Commands::SetCwd { name, path, unset } => {
+            let mut client = ensure_running().await?;
+            if unset {
+                client.unset_profile_cwd(&name).await?;
+            } else {
+                let p =
+                    path.ok_or_else(|| CliError::User("provide a path or use --unset".to_owned()))?;
+                client.set_profile_cwd(&name, &p).await?;
+            }
+        }
+        Commands::Config(sub) => match sub {
+            ConfigCommands::Get { key } => {
+                let mut client = ensure_running().await?;
+                let config = client.get_global_config().await?;
+                match key.as_deref() {
+                    None | Some("") => {
+                        let cwd_display = config.cwd.as_deref().unwrap_or("<not set>");
+                        println!("cwd = {cwd_display}");
+                    }
+                    Some("cwd") => {
+                        let cwd_display = config.cwd.as_deref().unwrap_or("<not set>");
+                        println!("{cwd_display}");
+                    }
+                    Some(k) => {
+                        return Err(CliError::User(format!("unknown config key: {k}")));
+                    }
+                }
+            }
+            ConfigCommands::Set { key, value } => {
+                let mut client = ensure_running().await?;
+                match key.as_str() {
+                    "cwd" => {
+                        client.set_global_config(Some(&value)).await?;
+                    }
+                    k => {
+                        return Err(CliError::User(format!("unknown config key: {k}")));
+                    }
+                }
+            }
+            ConfigCommands::Unset { key } => {
+                let mut client = ensure_running().await?;
+                match key.as_str() {
+                    "cwd" => {
+                        client.set_global_config(None).await?;
+                    }
+                    k => {
+                        return Err(CliError::User(format!("unknown config key: {k}")));
+                    }
+                }
+            }
+        },
     }
 
     Ok(())

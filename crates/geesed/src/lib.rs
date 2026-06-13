@@ -400,7 +400,8 @@ async fn dispatch_rpc(
             let guard = storage.lock().expect("storage mutex poisoned");
             match guard.get(name) {
                 Ok(profile) => {
-                    json!({"jsonrpc":"2.0","id":id,"result":profile_entry(&profile)}).to_string()
+                    let resolved_cwd = guard.resolve_cwd(name);
+                    json!({"jsonrpc":"2.0","id":id,"result":profile_entry_with_cwd(&profile, &resolved_cwd)}).to_string()
                 }
                 Err(e) => rpc_error(id, geese_error_code(&e), &e.to_string()),
             }
@@ -481,16 +482,19 @@ async fn dispatch_rpc(
             let Some(name) = params.get("name").and_then(Value::as_str) else {
                 return rpc_error(id, -32602, "Invalid params");
             };
-            // Look up profile path (sync lock, released before any await)
-            let profile_path = {
+            // Look up profile path and resolve cwd (sync lock, released before any await)
+            let (profile_path, resolved_cwd) = {
                 let guard = storage.lock().expect("storage mutex poisoned");
                 match guard.get(name) {
-                    Ok(profile) => profile.path().to_path_buf(),
+                    Ok(profile) => {
+                        let cwd = guard.resolve_cwd(name);
+                        (profile.path().to_path_buf(), cwd)
+                    }
                     Err(e) => return rpc_error(id, geese_error_code(&e), &e.to_string()),
                 }
             };
             let mut procs = processes.lock().await;
-            match procs.start(name, &profile_path).await {
+            match procs.start(name, &profile_path, &resolved_cwd).await {
                 Ok(pid) => json!({"jsonrpc":"2.0","id":id,"result":{"pid":pid}}).to_string(),
                 Err(ProcessError::GooseBinaryUnavailable(msg)) => rpc_error(id, -32010, &msg),
                 Err(ProcessError::SpawnFailed(msg)) => rpc_error(id, -32011, &msg),
@@ -539,6 +543,78 @@ async fn dispatch_rpc(
             json!({"jsonrpc":"2.0","id":id,"result":entries}).to_string()
         }
 
+        Some("profile.set_cwd") => {
+            let (Some(name), Some(cwd_str)) = (
+                params.get("name").and_then(Value::as_str),
+                params.get("cwd").and_then(Value::as_str),
+            ) else {
+                return rpc_error(id, -32602, "Invalid params");
+            };
+            let guard = storage.lock().expect("storage mutex poisoned");
+            match guard.set_profile_cwd(name, std::path::PathBuf::from(cwd_str)) {
+                Ok(()) => match guard.get(name) {
+                    Ok(profile) => {
+                        let resolved_cwd = guard.resolve_cwd(name);
+                        json!({"jsonrpc":"2.0","id":id,"result":profile_entry_with_cwd(&profile, &resolved_cwd)}).to_string()
+                    }
+                    Err(e) => rpc_error(id, geese_error_code(&e), &e.to_string()),
+                },
+                Err(e) => rpc_error(id, geese_error_code(&e), &e.to_string()),
+            }
+        }
+
+        Some("profile.unset_cwd") => {
+            let Some(name) = params.get("name").and_then(Value::as_str) else {
+                return rpc_error(id, -32602, "Invalid params");
+            };
+            let guard = storage.lock().expect("storage mutex poisoned");
+            match guard.unset_profile_cwd(name) {
+                Ok(()) => match guard.get(name) {
+                    Ok(profile) => {
+                        let resolved_cwd = guard.resolve_cwd(name);
+                        json!({"jsonrpc":"2.0","id":id,"result":profile_entry_with_cwd(&profile, &resolved_cwd)}).to_string()
+                    }
+                    Err(e) => rpc_error(id, geese_error_code(&e), &e.to_string()),
+                },
+                Err(e) => rpc_error(id, geese_error_code(&e), &e.to_string()),
+            }
+        }
+
+        Some("config.get_global") => {
+            let guard = storage.lock().expect("storage mutex poisoned");
+            match guard.load_global_config() {
+                Ok(config) => json!({"jsonrpc":"2.0","id":id,"result":{
+                    "cwd": config.cwd.as_deref().map(|p| p.to_string_lossy().into_owned()),
+                }})
+                .to_string(),
+                Err(e) => rpc_error(id, -32000, &e.to_string()),
+            }
+        }
+
+        Some("config.set_global") => {
+            let guard = storage.lock().expect("storage mutex poisoned");
+            let mut config = match guard.load_global_config() {
+                Ok(c) => c,
+                Err(e) => return rpc_error(id, -32000, &e.to_string()),
+            };
+            // cwd may be null to clear, or a string to set
+            match params.get("cwd") {
+                Some(Value::Null) => config.cwd = None,
+                Some(Value::String(s)) => config.cwd = Some(std::path::PathBuf::from(s)),
+                None => {} // not provided — no-op
+                Some(_) => {
+                    return rpc_error(id, -32602, "Invalid params: cwd must be a string or null");
+                }
+            }
+            match guard.save_global_config(&config) {
+                Ok(()) => json!({"jsonrpc":"2.0","id":id,"result":{
+                    "cwd": config.cwd.as_deref().map(|p| p.to_string_lossy().into_owned()),
+                }})
+                .to_string(),
+                Err(e) => rpc_error(id, -32000, &e.to_string()),
+            }
+        }
+
         _ => rpc_error(id, -32601, "Method not found"),
     }
 }
@@ -549,6 +625,17 @@ fn profile_entry(profile: &geese::Profile) -> Value {
         "locked": profile.meta().locked,
         "parent": profile.meta().parent,
         "path": profile.path().to_string_lossy(),
+    })
+}
+
+fn profile_entry_with_cwd(profile: &geese::Profile, resolved_cwd: &std::path::Path) -> Value {
+    json!({
+        "name": profile.name(),
+        "locked": profile.meta().locked,
+        "parent": profile.meta().parent,
+        "path": profile.path().to_string_lossy(),
+        "cwd": profile.meta().cwd.as_deref().map(|p| p.to_string_lossy().into_owned()),
+        "resolved_cwd": resolved_cwd.to_string_lossy(),
     })
 }
 
@@ -663,11 +750,14 @@ async fn handle_acp_connection(
     // Look up profile path
     let profile_result = {
         let guard = storage.lock().expect("storage mutex poisoned");
-        guard.get(&name).map(|profile| profile.path().to_path_buf())
+        guard.get(&name).map(|profile| {
+            let cwd = guard.resolve_cwd(&name);
+            (profile.path().to_path_buf(), cwd)
+        })
     };
 
-    let profile_path = match profile_result {
-        Ok(path) => path,
+    let (profile_path, resolved_cwd) = match profile_result {
+        Ok(pair) => pair,
         Err(geese::Error::ProfileNotFound(_)) => {
             let response = rpc_error(id, -32001, &format!("Profile not found: {}", name));
             write_half.write_all(response.as_bytes()).await?;
@@ -685,7 +775,7 @@ async fn handle_acp_connection(
     // Bind ACP connection
     let handles = {
         let mut procs = processes.lock().await;
-        match procs.bind_acp(&name, &profile_path).await {
+        match procs.bind_acp(&name, &profile_path, &resolved_cwd).await {
             Ok(handles) => handles,
             Err(ProcessError::ProfileInUse) => {
                 let response = rpc_error(id, -32020, &format!("Profile in use: {}", name));

@@ -388,7 +388,10 @@ async fn goose_binary_missing_returns_clear_error() {
 
     // ProcessMap with no binary: start must return GooseBinaryUnavailable
     let mut pm = geesed::processes::ProcessMap::new(None);
-    let err = pm.start("work", &profile_path).await.unwrap_err();
+    let err = pm
+        .start("work", &profile_path, tempdir.path())
+        .await
+        .unwrap_err();
     assert!(
         matches!(
             err,

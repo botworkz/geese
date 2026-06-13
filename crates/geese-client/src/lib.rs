@@ -126,6 +126,48 @@ impl GeesedClient {
             .await
     }
 
+    pub async fn set_profile_cwd(
+        &mut self,
+        name: &str,
+        cwd: &str,
+    ) -> Result<ProfileEntry, ClientError> {
+        self.call(
+            "profile.set_cwd",
+            serde_json::json!({"name": name, "cwd": cwd}),
+        )
+        .await
+    }
+
+    pub async fn unset_profile_cwd(&mut self, name: &str) -> Result<ProfileEntry, ClientError> {
+        self.call("profile.unset_cwd", serde_json::json!({"name": name}))
+            .await
+    }
+
+    pub async fn get_global_config(&mut self) -> Result<GlobalConfigResponse, ClientError> {
+        self.call("config.get_global", serde_json::json!({})).await
+    }
+
+    pub async fn set_global_config(
+        &mut self,
+        cwd: Option<&str>,
+    ) -> Result<GlobalConfigResponse, ClientError> {
+        let cwd_value = match cwd {
+            Some(s) => serde_json::Value::String(s.to_owned()),
+            None => serde_json::Value::Null,
+        };
+        self.call("config.set_global", serde_json::json!({"cwd": cwd_value}))
+            .await
+    }
+
+    /// Convenience: return the resolved cwd for a profile (calls `profile.get`).
+    pub async fn resolve_cwd(&mut self, name: &str) -> Result<std::path::PathBuf, ClientError> {
+        let entry = self.get_profile(name).await?;
+        let resolved = entry
+            .resolved_cwd
+            .ok_or_else(|| ClientError::Protocol("missing resolved_cwd field".into()))?;
+        Ok(std::path::PathBuf::from(resolved))
+    }
+
     async fn rpc_call(
         &self,
         method: &str,
@@ -296,6 +338,20 @@ pub struct ProfileEntry {
     pub locked: bool,
     pub parent: Option<String>,
     pub path: String,
+    /// Raw per-profile cwd setting (None if not set).
+    #[serde(default)]
+    pub cwd: Option<String>,
+    /// Resolved cwd after walking the 5-tier priority chain.
+    /// Only present on responses to `profile.get`, `profile.set_cwd`,
+    /// `profile.unset_cwd`.
+    #[serde(default)]
+    pub resolved_cwd: Option<String>,
+}
+
+/// Global geese configuration returned by `config.get_global`.
+#[derive(Debug, Clone, Deserialize)]
+pub struct GlobalConfigResponse {
+    pub cwd: Option<String>,
 }
 
 /// Response from `goosed.start`.
