@@ -246,3 +246,99 @@ async fn acp_handshake_profile_in_use() {
         Some(&json!(-32020))
     );
 }
+
+#[tokio::test]
+async fn connect_profile_then_goosed_start_returns_in_use() {
+    let root = tempdir().unwrap();
+    let goose_bin = PathBuf::from(env!("CARGO_BIN_EXE_mock-goose"));
+    let (_shutdown_tx, _task) = spawn_daemon(root.path(), goose_bin).await;
+
+    create_profile_via_control(root.path(), "work").await;
+
+    // 1. Acquire via connect_profile.
+    let stream = UnixStream::connect(acp_socket_path(root.path()))
+        .await
+        .unwrap();
+    let (read_half, mut write_half) = stream.into_split();
+    let mut reader = BufReader::new(read_half);
+    let handshake = json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "connect_profile",
+        "params": {"name": "work"}
+    });
+    send_json_line(&mut write_half, &handshake).await;
+    let resp = read_json_line(&mut reader).await;
+    assert!(
+        resp.get("result").is_some(),
+        "first handshake should succeed"
+    );
+
+    // 2. Try goosed.start over the control socket → must return -32020.
+    let control = UnixStream::connect(control_socket_path(root.path()))
+        .await
+        .unwrap();
+    let (control_read, mut control_write) = control.into_split();
+    let mut control_reader = BufReader::new(control_read);
+    let req = json!({
+        "jsonrpc": "2.0",
+        "id": 2,
+        "method": "goosed.start",
+        "params": {"name": "work"}
+    });
+    send_json_line(&mut control_write, &req).await;
+    let resp = read_json_line(&mut control_reader).await;
+    assert_eq!(
+        resp.get("error").and_then(|e| e.get("code")),
+        Some(&json!(-32020)),
+        "goosed.start should be refused while acp connection holds the profile: {resp}"
+    );
+}
+
+#[tokio::test]
+async fn goosed_start_then_connect_profile_returns_in_use() {
+    let root = tempdir().unwrap();
+    let goose_bin = PathBuf::from(env!("CARGO_BIN_EXE_mock-goose"));
+    let (_shutdown_tx, _task) = spawn_daemon(root.path(), goose_bin).await;
+
+    create_profile_via_control(root.path(), "work").await;
+
+    // 1. Start via control socket goosed.start.
+    let control = UnixStream::connect(control_socket_path(root.path()))
+        .await
+        .unwrap();
+    let (control_read, mut control_write) = control.into_split();
+    let mut control_reader = BufReader::new(control_read);
+    let req = json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "goosed.start",
+        "params": {"name": "work"}
+    });
+    send_json_line(&mut control_write, &req).await;
+    let resp = read_json_line(&mut control_reader).await;
+    assert!(
+        resp.get("result").is_some(),
+        "goosed.start should succeed first: {resp}"
+    );
+
+    // 2. Try connect_profile → must return -32020.
+    let stream = UnixStream::connect(acp_socket_path(root.path()))
+        .await
+        .unwrap();
+    let (read_half, mut write_half) = stream.into_split();
+    let mut reader = BufReader::new(read_half);
+    let handshake = json!({
+        "jsonrpc": "2.0",
+        "id": 2,
+        "method": "connect_profile",
+        "params": {"name": "work"}
+    });
+    send_json_line(&mut write_half, &handshake).await;
+    let resp = read_json_line(&mut reader).await;
+    assert_eq!(
+        resp.get("error").and_then(|e| e.get("code")),
+        Some(&json!(-32020)),
+        "connect_profile should be refused while goosed.start owns the profile: {resp}"
+    );
+}
