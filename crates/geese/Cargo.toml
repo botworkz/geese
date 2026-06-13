@@ -1,0 +1,16 @@
+[package]
+name = "geese"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+clap.workspace = true
+geese-client = { path = "../geese-client" }
+thiserror.workspace = true
+tokio.workspace = true
+
+[dev-dependencies]
+assert_cmd.workspace = true
+tempfile.workspace = true
+nix.workspace = true
