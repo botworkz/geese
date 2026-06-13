@@ -1,7 +1,7 @@
 use std::{env, path::PathBuf, process};
 
 use clap::{Parser, Subcommand};
-use geese_client::{ClientError, GeesedClient};
+use geese_client::{ClientError, GeesedClient, ensure_running};
 use thiserror::Error;
 
 #[derive(Debug, Parser)]
@@ -14,7 +14,22 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Commands {
+    /// Show geesed daemon status (does not autospawn)
     Status,
+    /// List profiles (* prefix on locked)
+    List,
+    /// Create a new profile
+    New { name: String },
+    /// Delete a profile
+    Delete { name: String },
+    /// Lock a profile
+    Lock { name: String },
+    /// Unlock a profile
+    Unlock { name: String },
+    /// Copy a profile
+    Copy { src: String, dest: String },
+    /// Print the path of a profile
+    Path { name: String },
 }
 
 #[derive(Debug, Error)]
@@ -54,6 +69,42 @@ async fn run() -> Result<(), CliError> {
             println!("  uptime:     {}", format_uptime(status.uptime_ms));
             println!("  socket:     {}", socket_path.display());
             println!("  started:    {}", status.started_at);
+        }
+        Commands::List => {
+            let mut client = ensure_running().await?;
+            let profiles = client.list_profiles().await?;
+            for entry in profiles {
+                if entry.locked {
+                    println!("*{}", entry.name);
+                } else {
+                    println!("{}", entry.name);
+                }
+            }
+        }
+        Commands::New { name } => {
+            let mut client = ensure_running().await?;
+            client.create_profile(&name).await?;
+        }
+        Commands::Delete { name } => {
+            let mut client = ensure_running().await?;
+            client.delete_profile(&name).await?;
+        }
+        Commands::Lock { name } => {
+            let mut client = ensure_running().await?;
+            client.lock_profile(&name).await?;
+        }
+        Commands::Unlock { name } => {
+            let mut client = ensure_running().await?;
+            client.unlock_profile(&name).await?;
+        }
+        Commands::Copy { src, dest } => {
+            let mut client = ensure_running().await?;
+            client.copy_profile(&src, &dest).await?;
+        }
+        Commands::Path { name } => {
+            let mut client = ensure_running().await?;
+            let entry = client.get_profile(&name).await?;
+            println!("{}", entry.path);
         }
     }
 

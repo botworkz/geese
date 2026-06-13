@@ -4,7 +4,7 @@ use std::{
     io::{Seek, SeekFrom, Write},
     os::unix::fs::PermissionsExt,
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
 
@@ -25,12 +25,18 @@ use tracing::info;
 #[derive(Debug, Default)]
 pub struct RunOpts {
     pub runtime_dir: Option<PathBuf>,
+    pub geese_root: Option<PathBuf>,
     pub shutdown: Option<watch::Receiver<bool>>,
 }
 
 impl RunOpts {
     pub fn with_runtime_dir(mut self, runtime_dir: impl Into<PathBuf>) -> Self {
         self.runtime_dir = Some(runtime_dir.into());
+        self
+    }
+
+    pub fn with_geese_root(mut self, geese_root: impl Into<PathBuf>) -> Self {
+        self.geese_root = Some(geese_root.into());
         self
     }
 
@@ -44,6 +50,8 @@ impl RunOpts {
 pub enum RunError {
     #[error("geesed: already running, pid={pid}")]
     AlreadyRunning { pid: String },
+    #[error("geesed: storage: {0}")]
+    Storage(String),
     #[error(transparent)]
     Io(#[from] std::io::Error),
 }
@@ -55,6 +63,14 @@ pub async fn run(opts: RunOpts) -> Result<(), RunError> {
     let lockfile = Lockfile::acquire(runtime_dir.lockfile_path())?;
     let control_socket = ControlSocket::bind(runtime_dir.socket_path())?;
     let state = Arc::new(DaemonState::new(lockfile.pid()));
+
+    let storage = {
+        let s = match opts.geese_root {
+            Some(root) => geese::Storage::at(root),
+            None => geese::Storage::from_env().map_err(|e| RunError::Storage(e.to_string()))?,
+        };
+        Arc::new(Mutex::new(s))
+    };
 
     info!(
         "geesed v{} listening on {} pid={}",
@@ -73,8 +89,9 @@ pub async fn run(opts: RunOpts) -> Result<(), RunError> {
             accept_result = control_socket.accept() => {
                 let (stream, _) = accept_result?;
                 let state = Arc::clone(&state);
+                let storage = Arc::clone(&storage);
                 tasks.spawn(async move {
-                    if let Err(error) = handle_connection(stream, state).await {
+                    if let Err(error) = handle_connection(stream, state, storage).await {
                         tracing::debug!("control connection ended with error: {error}");
                     }
                 });
@@ -247,7 +264,11 @@ struct StatusPayload {
     started_at: String,
 }
 
-async fn handle_connection(stream: UnixStream, state: Arc<DaemonState>) -> std::io::Result<()> {
+async fn handle_connection(
+    stream: UnixStream,
+    state: Arc<DaemonState>,
+    storage: Arc<Mutex<geese::Storage>>,
+) -> std::io::Result<()> {
     let (read_half, mut write_half) = stream.into_split();
     let mut reader = BufReader::new(read_half);
     let mut buf = Vec::new();
@@ -264,7 +285,7 @@ async fn handle_connection(stream: UnixStream, state: Arc<DaemonState>) -> std::
         }
 
         let response = match std::str::from_utf8(&buf) {
-            Ok(line) => rpc_response(line, &state),
+            Ok(line) => rpc_response(line, &state, &storage),
             Err(_) => rpc_error(Value::Null, -32700, "Parse error"),
         };
 
@@ -273,13 +294,15 @@ async fn handle_connection(stream: UnixStream, state: Arc<DaemonState>) -> std::
     }
 }
 
-fn rpc_response(line: &str, state: &DaemonState) -> String {
+fn rpc_response(line: &str, state: &DaemonState, storage: &Mutex<geese::Storage>) -> String {
     let value: Value = match serde_json::from_str(line) {
         Ok(value) => value,
         Err(_) => return rpc_error(Value::Null, -32700, "Parse error"),
     };
 
     let id = value.get("id").cloned().unwrap_or(Value::Null);
+    let params = value.get("params").cloned().unwrap_or(Value::Null);
+
     match value.get("method").and_then(Value::as_str) {
         Some("status") => json!({
             "jsonrpc": "2.0",
@@ -287,7 +310,134 @@ fn rpc_response(line: &str, state: &DaemonState) -> String {
             "result": state.status(),
         })
         .to_string(),
+
+        Some("profile.list") => {
+            let guard = storage.lock().expect("storage mutex poisoned");
+            match guard.list_full() {
+                Ok(entries) => {
+                    let entries: Vec<Value> = entries
+                        .iter()
+                        .map(|(meta, path)| profile_entry_from_parts(meta, path))
+                        .collect();
+                    json!({"jsonrpc":"2.0","id":id,"result":entries}).to_string()
+                }
+                Err(e) => rpc_error(id, -32000, &e.to_string()),
+            }
+        }
+
+        Some("profile.get") => {
+            let Some(name) = params.get("name").and_then(Value::as_str) else {
+                return rpc_error(id, -32602, "Invalid params");
+            };
+            let guard = storage.lock().expect("storage mutex poisoned");
+            match guard.get(name) {
+                Ok(profile) => {
+                    json!({"jsonrpc":"2.0","id":id,"result":profile_entry(&profile)}).to_string()
+                }
+                Err(e) => rpc_error(id, geese_error_code(&e), &e.to_string()),
+            }
+        }
+
+        Some("profile.create") => {
+            let Some(name) = params.get("name").and_then(Value::as_str) else {
+                return rpc_error(id, -32602, "Invalid params");
+            };
+            let guard = storage.lock().expect("storage mutex poisoned");
+            match guard.create(name) {
+                Ok(profile) => {
+                    json!({"jsonrpc":"2.0","id":id,"result":profile_entry(&profile)}).to_string()
+                }
+                Err(e) => rpc_error(id, geese_error_code(&e), &e.to_string()),
+            }
+        }
+
+        Some("profile.delete") => {
+            let Some(name) = params.get("name").and_then(Value::as_str) else {
+                return rpc_error(id, -32602, "Invalid params");
+            };
+            let guard = storage.lock().expect("storage mutex poisoned");
+            match guard.delete(name) {
+                Ok(()) => json!({"jsonrpc":"2.0","id":id,"result":null}).to_string(),
+                Err(e) => rpc_error(id, geese_error_code(&e), &e.to_string()),
+            }
+        }
+
+        Some("profile.lock") => {
+            let Some(name) = params.get("name").and_then(Value::as_str) else {
+                return rpc_error(id, -32602, "Invalid params");
+            };
+            let guard = storage.lock().expect("storage mutex poisoned");
+            match guard.get(name) {
+                Ok(mut profile) => match profile.lock() {
+                    Ok(()) => json!({"jsonrpc":"2.0","id":id,"result":profile_entry(&profile)})
+                        .to_string(),
+                    Err(e) => rpc_error(id, geese_error_code(&e), &e.to_string()),
+                },
+                Err(e) => rpc_error(id, geese_error_code(&e), &e.to_string()),
+            }
+        }
+
+        Some("profile.unlock") => {
+            let Some(name) = params.get("name").and_then(Value::as_str) else {
+                return rpc_error(id, -32602, "Invalid params");
+            };
+            let guard = storage.lock().expect("storage mutex poisoned");
+            match guard.get(name) {
+                Ok(mut profile) => match profile.unlock() {
+                    Ok(()) => json!({"jsonrpc":"2.0","id":id,"result":profile_entry(&profile)})
+                        .to_string(),
+                    Err(e) => rpc_error(id, geese_error_code(&e), &e.to_string()),
+                },
+                Err(e) => rpc_error(id, geese_error_code(&e), &e.to_string()),
+            }
+        }
+
+        Some("profile.copy") => {
+            let (src, dest) = match (
+                params.get("src").and_then(Value::as_str),
+                params.get("dest").and_then(Value::as_str),
+            ) {
+                (Some(s), Some(d)) => (s, d),
+                _ => return rpc_error(id, -32602, "Invalid params"),
+            };
+            let guard = storage.lock().expect("storage mutex poisoned");
+            match guard.copy(src, dest) {
+                Ok(profile) => {
+                    json!({"jsonrpc":"2.0","id":id,"result":profile_entry(&profile)}).to_string()
+                }
+                Err(e) => rpc_error(id, geese_error_code(&e), &e.to_string()),
+            }
+        }
+
         _ => rpc_error(id, -32601, "Method not found"),
+    }
+}
+
+fn profile_entry(profile: &geese::Profile) -> Value {
+    json!({
+        "name": profile.name(),
+        "locked": profile.meta().locked,
+        "parent": profile.meta().parent,
+        "path": profile.path().to_string_lossy(),
+    })
+}
+
+fn profile_entry_from_parts(meta: &geese::ProfileMeta, path: &std::path::Path) -> Value {
+    json!({
+        "name": meta.name,
+        "locked": meta.locked,
+        "parent": meta.parent,
+        "path": path.to_string_lossy(),
+    })
+}
+
+fn geese_error_code(e: &geese::Error) -> i64 {
+    match e {
+        geese::Error::ProfileNotFound(_) => -32001,
+        geese::Error::ProfileExists(_) => -32002,
+        geese::Error::InvalidName(_) => -32003,
+        geese::Error::ProfileLocked(_) => -32004,
+        _ => -32000,
     }
 }
 
